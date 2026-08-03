@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible LumaWall problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve LumaWall. Do not attach copyrighted wallpaper assets.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac model
+      placeholder: macOS 15.6, MacBook Pro M3
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Wallpaper format
+      options:
+        - Video (MP4/MOV/M4V)
+        - Wallpaper Engine scene.pkg
+        - Wallpaper Engine project folder
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include exact steps, expected behavior, and observed behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: shell
+
