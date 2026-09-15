@@ -11,7 +11,9 @@ struct WavePass {
     var maskPath: String?
 }
 
-final class SceneResources {
+final class SceneResources: @unchecked Sendable {
+    private static let maximumJSONBytes = 8 * 1_024 * 1_024
+    private static let maximumCombinedTextureBytes = 512 * 1_024 * 1_024
     let device: MTLDevice
     let baseTexture: MTLTexture
     let maskTextures: [MTLTexture]
@@ -23,7 +25,7 @@ final class SceneResources {
     init(packageURL: URL) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw ImportError.unsupportedProject("Metal-incompatible") }
         let package = try ScenePackage(url: packageURL)
-        let sceneData = try package.data(for: "scene.json")
+        let sceneData = try package.data(for: "scene.json", maximumBytes: Self.maximumJSONBytes)
         guard let scene = try JSONSerialization.jsonObject(with: sceneData) as? [String: Any],
               let objects = scene["objects"] as? [[String: Any]] else { throw ScenePackageError.missingEntry("scene.json") }
 
@@ -37,7 +39,8 @@ final class SceneResources {
             throw ImportError.unsupportedProject("scene without a base image")
         }
         let basePath = "materials/\(textureName).tex"
-        let base = try WETexture(data: package.data(for: basePath))
+        let base = try WETexture(data: package.data(for: basePath, maximumBytes: WETexture.maximumInputBytes))
+        guard base.pixels.count <= Self.maximumCombinedTextureBytes else { throw WETextureError.resourceTooLarge }
         baseTexture = try Self.makeTexture(base, device: device)
         sourceSize = SIMD2(Float(base.width), Float(base.height))
 
@@ -57,9 +60,14 @@ final class SceneResources {
             }
         }
         self.waves = Array(waves.prefix(3))
+        var combinedTextureBytes = base.pixels.count
         maskTextures = try self.waves.map { wave in
             guard let path = wave.maskPath, package.contains(path) else { return try Self.whiteTexture(device) }
-            return try Self.makeTexture(WETexture(data: package.data(for: path)), device: device)
+            let texture = try WETexture(data: package.data(for: path, maximumBytes: WETexture.maximumInputBytes))
+            let (newTotal, overflow) = combinedTextureBytes.addingReportingOverflow(texture.pixels.count)
+            guard !overflow, newTotal <= Self.maximumCombinedTextureBytes else { throw WETextureError.resourceTooLarge }
+            combinedTextureBytes = newTotal
+            return try Self.makeTexture(texture, device: device)
         }
         hasFog = objects.contains { ($0["particle"] as? String)?.contains("fog") == true }
         hasEmbers = objects.contains { ($0["particle"] as? String)?.contains("ember") == true }
@@ -67,7 +75,7 @@ final class SceneResources {
     }
 
     private static func json(_ package: ScenePackage, _ path: String) throws -> [String: Any]? {
-        try JSONSerialization.jsonObject(with: package.data(for: path)) as? [String: Any]
+        try JSONSerialization.jsonObject(with: package.data(for: path, maximumBytes: maximumJSONBytes)) as? [String: Any]
     }
 
     private static func makeTexture(_ source: WETexture, device: MTLDevice) throws -> MTLTexture {
@@ -80,8 +88,19 @@ final class SceneResources {
         descriptor.usage = [.shaderRead]
         guard let texture = device.makeTexture(descriptor: descriptor) else { throw WETextureError.invalid }
         let channels = source.format == 9 ? 1 : (source.format == 8 ? 2 : 4)
-        source.pixels.withUnsafeBytes { bytes in
-            texture.replace(region: MTLRegionMake2D(0, 0, source.width, source.height), mipmapLevel: 0, withBytes: bytes.baseAddress!, bytesPerRow: source.width * channels)
+        let (bytesPerRow, rowOverflow) = source.width.multipliedReportingOverflow(by: channels)
+        let (requiredBytes, sizeOverflow) = bytesPerRow.multipliedReportingOverflow(by: source.height)
+        guard !rowOverflow, !sizeOverflow, requiredBytes <= source.pixels.count else {
+            throw WETextureError.invalidPixelData
+        }
+        try source.pixels.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { throw WETextureError.invalidPixelData }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, source.width, source.height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: bytesPerRow
+            )
         }
         return texture
     }
@@ -113,9 +132,9 @@ private struct SceneUniforms {
 }
 
 final class SceneMetalView: MTKView, MTKViewDelegate {
-    private let resources: SceneResources
-    private let queue: MTLCommandQueue
-    private let pipeline: MTLRenderPipelineState
+    private let resources: SceneResources?
+    private let queue: MTLCommandQueue?
+    private let pipeline: MTLRenderPipelineState?
     private let started = CACurrentMediaTime()
     var scaling: VideoScaling = .fill
 
@@ -139,11 +158,19 @@ final class SceneMetalView: MTKView, MTKViewDelegate {
         delegate = self
     }
 
-    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    required init(coder: NSCoder) {
+        resources = nil
+        queue = nil
+        pipeline = nil
+        super.init(coder: coder)
+        isPaused = true
+        delegate = self
+    }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { }
 
     func draw(in view: MTKView) {
-        guard let drawable = currentDrawable, let renderPassDescriptor = currentRenderPassDescriptor,
+        guard let resources, let queue, let pipeline,
+              let drawable = currentDrawable, let renderPassDescriptor = currentRenderPassDescriptor,
               let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
         let size = drawableSize
         var uniforms = SceneUniforms(

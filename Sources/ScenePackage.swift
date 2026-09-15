@@ -12,6 +12,7 @@ enum ScenePackageError: LocalizedError, Equatable {
     case invalidDirectory
     case unsafePath(String)
     case missingEntry(String)
+    case resourceTooLarge
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +21,7 @@ enum ScenePackageError: LocalizedError, Equatable {
         case .invalidDirectory: return "The scene package directory is damaged or incomplete."
         case .unsafePath(let path): return "The package contains an unsafe path: \(path)"
         case .missingEntry(let path): return "The package does not contain \(path)."
+        case .resourceTooLarge: return "The scene package exceeds the safe processing limit."
         }
     }
 }
@@ -27,6 +29,7 @@ enum ScenePackageError: LocalizedError, Equatable {
 /// A bounds-checked reader for Wallpaper Engine PKGV packages.
 /// Entry offsets are relative to the byte immediately following the directory.
 struct ScenePackage {
+    private static let maximumPackageBytes = 2 * 1_024 * 1_024 * 1_024
     let version: String
     let entries: [ScenePackageEntry]
 
@@ -34,11 +37,16 @@ struct ScenePackage {
     private let payloadOffset: Int
 
     init(url: URL) throws {
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           size > Self.maximumPackageBytes {
+            throw ScenePackageError.resourceTooLarge
+        }
         guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { throw ScenePackageError.unreadable }
         try self.init(data: data)
     }
 
     init(data: Data) throws {
+        guard data.count <= Self.maximumPackageBytes else { throw ScenePackageError.resourceTooLarge }
         var cursor = 0
         let version = try Self.readString(data, cursor: &cursor)
         guard version.hasPrefix("PKGV") else { throw ScenePackageError.invalidHeader }
@@ -46,10 +54,12 @@ struct ScenePackage {
         guard count <= 100_000 else { throw ScenePackageError.invalidDirectory }
 
         var entries: [ScenePackageEntry] = []
+        var paths = Set<String>()
         entries.reserveCapacity(Int(count))
         for _ in 0..<count {
             let path = try Self.readString(data, cursor: &cursor)
             try Self.validate(path: path)
+            guard paths.insert(path).inserted else { throw ScenePackageError.invalidDirectory }
             let offset = Int(try Self.readUInt32(data, cursor: &cursor))
             let length = Int(try Self.readUInt32(data, cursor: &cursor))
             entries.append(ScenePackageEntry(path: path, offset: offset, length: length))
@@ -78,15 +88,62 @@ struct ScenePackage {
         return data.subdata(in: start..<(start + entry.length))
     }
 
+    func data(for path: String, maximumBytes: Int) throws -> Data {
+        guard maximumBytes >= 0 else { throw ScenePackageError.resourceTooLarge }
+        guard let entry = entries.first(where: { $0.path == path }) else { throw ScenePackageError.missingEntry(path) }
+        guard entry.length <= maximumBytes else { throw ScenePackageError.resourceTooLarge }
+        let start = payloadOffset + entry.offset
+        return data.subdata(in: start..<(start + entry.length))
+    }
+
     func extract(to destination: URL) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let canonicalDestination = destination.standardizedFileURL.resolvingSymlinksInPath()
         for entry in entries {
-            let output = destination.appendingPathComponent(entry.path).standardizedFileURL
-            guard output.path.hasPrefix(destination.standardizedFileURL.path + "/") else {
+            let output = canonicalDestination.appendingPathComponent(entry.path).standardizedFileURL
+            guard output.path.hasPrefix(canonicalDestination.path + "/") else {
                 throw ScenePackageError.unsafePath(entry.path)
             }
-            try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Self.prepareParentDirectories(
+                for: output,
+                beneath: canonicalDestination,
+                entryPath: entry.path
+            )
             try data(for: entry.path).write(to: output, options: .atomic)
+        }
+    }
+
+    private static func prepareParentDirectories(
+        for output: URL,
+        beneath destination: URL,
+        entryPath: String
+    ) throws {
+        let fileManager = FileManager.default
+        let relativeParent = output.deletingLastPathComponent().path
+            .dropFirst(destination.path.count)
+            .split(separator: "/")
+        var current = destination
+
+        for component in relativeParent {
+            current.appendPathComponent(String(component), isDirectory: true)
+            if (try? fileManager.destinationOfSymbolicLink(atPath: current.path)) != nil {
+                throw ScenePackageError.unsafePath(entryPath)
+            }
+
+            var isDirectory = ObjCBool(false)
+            if fileManager.fileExists(atPath: current.path, isDirectory: &isDirectory) {
+                guard isDirectory.boolValue else { throw ScenePackageError.unsafePath(entryPath) }
+            } else {
+                try fileManager.createDirectory(at: current, withIntermediateDirectories: false)
+            }
+        }
+
+        if (try? fileManager.destinationOfSymbolicLink(atPath: output.path)) != nil {
+            throw ScenePackageError.unsafePath(entryPath)
+        }
+        guard output.deletingLastPathComponent().resolvingSymlinksInPath().path
+            .hasPrefix(destination.path + "/") || output.deletingLastPathComponent() == destination else {
+            throw ScenePackageError.unsafePath(entryPath)
         }
     }
 

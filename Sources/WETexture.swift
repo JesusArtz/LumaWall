@@ -6,28 +6,37 @@ enum WETextureError: LocalizedError {
     case invalid
     case unsupportedFormat(UInt32)
     case decompressionFailed
+    case resourceTooLarge
+    case invalidPixelData
 
     var errorDescription: String? {
         switch self {
         case .invalid: return "A texture inside the scene package is damaged."
         case .unsupportedFormat(let value): return "The scene uses unsupported texture format \(value)."
         case .decompressionFailed: return "A compressed scene texture could not be decoded."
+        case .resourceTooLarge: return "A scene texture exceeds the safe decoding limit."
+        case .invalidPixelData: return "A scene texture does not contain enough pixel data for its dimensions."
         }
     }
 }
 
 struct WETexture {
+    static let maximumInputBytes = 384 * 1_024 * 1_024
+    private static let maximumDimension = 16_384
+    private static let maximumDecodedBytes = 256 * 1_024 * 1_024
+
     let format: UInt32
     let width: Int
     let height: Int
     let pixels: Data
 
     init(data: Data) throws {
+        guard data.count <= Self.maximumInputBytes else { throw WETextureError.resourceTooLarge }
         var reader = TextureReader(data)
         guard try reader.bytes(9) == Data("TEXV0005\0".utf8),
               try reader.bytes(9) == Data("TEXI0001\0".utf8) else { throw WETextureError.invalid }
-        format = try reader.u32()
-        guard [UInt32(0), 8, 9].contains(format) else { throw WETextureError.unsupportedFormat(format) }
+        let declaredFormat = try reader.u32()
+        guard [UInt32(0), 8, 9].contains(declaredFormat) else { throw WETextureError.unsupportedFormat(declaredFormat) }
         _ = try reader.u32() // flags
         _ = try reader.u32() // allocated width
         _ = try reader.u32() // allocated height
@@ -51,6 +60,12 @@ struct WETexture {
         let storedSize = Int(try reader.i32())
         if compression == 0 { uncompressedSize = storedSize }
         guard mipWidth > 0, mipHeight > 0, uncompressedSize > 0, storedSize > 0 else { throw WETextureError.invalid }
+        guard mipWidth <= Self.maximumDimension,
+              mipHeight <= Self.maximumDimension,
+              uncompressedSize <= Self.maximumDecodedBytes,
+              storedSize <= Self.maximumDecodedBytes else {
+            throw WETextureError.resourceTooLarge
+        }
         let stored = try reader.bytes(storedSize)
         let decoded: Data
         if compression == 1 {
@@ -66,7 +81,14 @@ struct WETexture {
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw WETextureError.invalid }
             let decodedWidth = image.width
             let decodedHeight = image.height
-            var rgba = Data(count: decodedWidth * decodedHeight * 4)
+            guard decodedWidth > 0, decodedHeight > 0,
+                  decodedWidth <= Self.maximumDimension,
+                  decodedHeight <= Self.maximumDimension,
+                  let rgbaSize = Self.requiredByteCount(width: decodedWidth, height: decodedHeight, channels: 4),
+                  rgbaSize <= Self.maximumDecodedBytes else {
+                throw WETextureError.resourceTooLarge
+            }
+            var rgba = Data(count: rgbaSize)
             let rendered = rgba.withUnsafeMutableBytes { raw -> Bool in
                 guard let context = CGContext(
                     data: raw.baseAddress,
@@ -84,11 +106,25 @@ struct WETexture {
             width = decodedWidth
             height = decodedHeight
             pixels = rgba
+            format = 0
         } else {
+            let channels = declaredFormat == 9 ? 1 : (declaredFormat == 8 ? 2 : 4)
+            guard let requiredBytes = Self.requiredByteCount(width: mipWidth, height: mipHeight, channels: channels),
+                  requiredBytes <= decoded.count else {
+                throw WETextureError.invalidPixelData
+            }
             width = mipWidth
             height = mipHeight
             pixels = decoded
+            format = declaredFormat
         }
+    }
+
+    private static func requiredByteCount(width: Int, height: Int, channels: Int) -> Int? {
+        let (rowBytes, rowOverflow) = width.multipliedReportingOverflow(by: channels)
+        guard !rowOverflow else { return nil }
+        let (totalBytes, totalOverflow) = rowBytes.multipliedReportingOverflow(by: height)
+        return totalOverflow ? nil : totalBytes
     }
 }
 
@@ -114,7 +150,9 @@ private struct TextureReader {
 
 private enum LZ4Block {
     static func decode(_ source: Data, outputSize: Int) throws -> Data {
-        guard outputSize >= 0 else { throw WETextureError.decompressionFailed }
+        guard outputSize >= 0, outputSize <= 256 * 1_024 * 1_024 else {
+            throw WETextureError.resourceTooLarge
+        }
         var output = Data(count: outputSize)
         let written = source.withUnsafeBytes { srcRaw -> Int? in
             output.withUnsafeMutableBytes { dstRaw -> Int? in
