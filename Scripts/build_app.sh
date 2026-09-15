@@ -16,7 +16,7 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE_DIR" SWIFT_MODULE_CACHE_PATH="$MODULE_CAC
 xcrun swiftc -parse-as-library -O -sdk "$SDK_PATH" -target "$ARCH-apple-macosx14.0" \
   -framework SwiftUI -framework AppKit -framework AVFoundation -framework QuartzCore \
   -framework Metal -framework MetalKit -framework CoreGraphics -framework ImageIO \
-  -framework ServiceManagement -framework UniformTypeIdentifiers \
+  -framework Security -framework ServiceManagement -framework UniformTypeIdentifiers -framework WebKit \
   "$PROJECT_DIR"/Sources/*.swift -o "$MACOS_DIR/LumaWall"
 
 cp "$PROJECT_DIR/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
