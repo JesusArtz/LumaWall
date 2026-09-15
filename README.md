@@ -1,7 +1,7 @@
 <div align="center">
   <img src="Resources/AppIcon.png" width="128" alt="LumaWall app icon">
   <h1>LumaWall</h1>
-  <p>A lightweight, native live wallpaper engine for macOS.</p>
+  <p>A native macOS library and player for compatible Wallpaper Engine projects.</p>
 
   [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111827?logo=apple)](https://support.apple.com/macos)
   [![Swift](https://img.shields.io/badge/Swift-5.9-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
@@ -9,24 +9,24 @@
   [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
 </div>
 
-![LumaWall library](Docs/screenshot.png)
-
-LumaWall lives quietly in the menu bar and renders motion behind your desktop
-icons. It plays ordinary videos with AVFoundation and renders compatible Wallpaper
-Engine scenes directly with Metal—without Wine, Electron, or a Windows runtime.
+LumaWall browses public Wallpaper Engine Workshop metadata, downloads projects through
+a legitimate SteamCMD sign-in, manages local wallpaper files, and renders compatible
+content behind the macOS desktop icons. It uses only native Apple frameworks and does
+not bundle Wine, Electron, or a Windows runtime.
 
 ## Highlights
 
-- Native SwiftUI/AppKit menu-bar experience
-- Hardware-accelerated MP4, MOV, and M4V looping
-- Direct import of Wallpaper Engine `scene.pkg` packages
-- Wallpaper Engine video and scene project-folder import
-- Native image-scene rendering with masked water waves, fog, and embers
-- Fill and fit modes across multiple displays
-- Pause, resume, and stop controls from the menu bar
-- Automatic pause during display sleep and inactive user sessions
+- Native Discover, Library, Playlists, Displays, and Settings sections
+- Workshop search, type/tag/content filters, sorting, details, and cursor pagination
+- Legitimate SteamCMD authentication, Steam Guard prompts, queued downloads, and progress
+- Managed import of project folders, ZIP archives, scene packages, and supported videos
+- Hardware-accelerated MP4, MOV, and M4V looping with per-display playback settings
+- Local HTML/CSS/JavaScript/WebGL wallpapers in an isolated `WKWebView`
+- Partial native Metal rendering for compatible Wallpaper Engine image scenes
+- Persistent favorites independent of downloads, recent wallpapers, playlists, and per-display assignments
+- Pause and resume from the app or menu bar, including event-driven power/session handling
 - Optional Launch at Login
-- No analytics, accounts, uploads, or third-party runtime dependencies
+- No analytics or third-party application frameworks; SteamCMD remains an external tool for downloads
 
 ## Compatibility
 
@@ -34,11 +34,12 @@ Engine scenes directly with Metal—without Wine, Electron, or a Windows runtime
 |---|---|
 | MP4, MOV, M4V | Supported |
 | Wallpaper Engine video projects | Supported |
-| `scene.pkg` image scenes | Supported |
-| Water-wave masks, fog, ember particles | Supported |
-| Advanced SceneScript, puppet rigs, complex effects | Partial / evolving |
-| Web wallpapers | Not executed |
+| Local web projects | Supported; see security notes below |
+| `scene.pkg` image scenes | Partial, with explicit preview fallback |
+| Up to three compatible wave passes | Partial approximation |
+| DXT textures, multiple layers, timelines, general particles and custom shaders | Unsupported |
 | Application wallpapers and Windows executables | Not executed |
+| WebM | Not advertised; AVFoundation support is not assumed |
 
 Wallpaper Engine is an evolving, proprietary format. A package importing successfully
 does not imply every original effect can be reproduced yet. Compatibility reports and
@@ -49,6 +50,8 @@ clean-room format research are welcome.
 - macOS 14 Sonoma or newer
 - Apple Silicon Mac recommended (the build script targets the current Mac architecture)
 - Apple Command Line Tools for building from source
+- SteamCMD and a Steam account with legitimate Wallpaper Engine access for Workshop downloads
+- A Steam Web API key, stored in Keychain, for in-app Workshop browsing
 
 ## Build from source
 
@@ -66,24 +69,27 @@ The local build is ad-hoc signed. The finished app is written to
 
 ## Use LumaWall
 
-1. Open LumaWall and choose **Add Wallpaper**.
-2. Select a video, `scene.pkg`, or Wallpaper Engine project folder. You can also
-   drag it onto the library window.
-3. Choose **Set as Wallpaper**.
-4. Pause, resume, stop, or reopen the library from the menu-bar icon.
+1. Open **Settings** to configure a Steam Web API key and locate SteamCMD when using the Workshop.
+2. Browse **Discover**, inspect an item, and download it through SteamCMD, or use **Import** for local content.
+3. Open a Library item to preview it and choose a target display.
+4. Manage different assignments under **Displays**, and pause or resume them from the menu bar.
 
-LumaWall references imported files in place. Keep the original file or project folder
-where it was when imported.
+New imports are copied into the managed Application Support library. Metadata from the
+older path-based library is migrated without deleting or moving the original files.
 
 ## Design and privacy
 
-LumaWall is intentionally small: native system frameworks handle the interface,
-video decoding, desktop windows, and GPU rendering. Imported projects are treated as
-untrusted data. Windows executables, web content, and project scripts are not run.
+Native system frameworks handle the interface, networking, video decoding, Web content,
+desktop windows, Keychain access, and GPU rendering. Imported projects are treated as
+untrusted data. Application projects and Windows executables are rejected. Web projects
+do execute their local JavaScript in WebKit; top-level external navigation is blocked,
+file read access is limited to the project root, and ordinary web resource requests can
+still reach the network.
 
-The app stores only library paths and preferences locally in `UserDefaults`. It has no
-telemetry or network service. See [the architecture overview](Docs/ARCHITECTURE.md) for
-the main components.
+The app stores library and playlist metadata in Application Support, display assignments
+and preferences in `UserDefaults`, and the Steam Web API key in Keychain. Passwords and
+Steam Guard codes are never persisted or logged. See [the architecture overview](Docs/ARCHITECTURE.md)
+and [implementation status](IMPLEMENTATION_STATUS.md) for details and current limits.
 
 ## Contributing
 
