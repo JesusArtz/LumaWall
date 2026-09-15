@@ -30,7 +30,6 @@ final class AppState: ObservableObject {
     @Published var selectedID: WallpaperItem.ID?
     @Published var selectedPlaylistID: WallpaperPlaylist.ID?
     @Published var selectedSection: AppSection? = .library
-    @Published var alertMessage: String?
     @Published var issue: AppIssue?
     @Published private(set) var isImporting = false
     @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled

@@ -1,421 +1,418 @@
-import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
+
+private enum LibraryFilter: String, CaseIterable, Identifiable {
+    case all
+    case favorites
+    case video
+    case web
+    case scene
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
+private enum LibrarySort: String, CaseIterable, Identifiable {
+    case recentlyPlayed
+    case recentlyAdded
+    case name
+    case size
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .recentlyPlayed: return "Recently Played"
+        case .recentlyAdded: return "Recently Added"
+        case .name: return "Name"
+        case .size: return "Size"
+        }
+    }
+}
 
 struct LibraryView: View {
     @EnvironmentObject private var state: AppState
-    @EnvironmentObject private var player: WallpaperPlayer
-    @State private var dropTargeted = false
+    @EnvironmentObject private var player: WallpaperCoordinator
+    @State private var searchText = ""
+    @State private var filter: LibraryFilter = .all
+    @State private var sort: LibrarySort = .recentlyAdded
+    @State private var gridLayout = true
+    @State private var detailItem: WallpaperItem?
+    @State private var pendingRemoval: WallpaperItem?
+
+    private let columns = [GridItem(.adaptive(minimum: 210, maximum: 310), spacing: 18)]
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            Divider().opacity(0.45)
-            detail
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
         }
-        .frame(minWidth: 820, minHeight: 540)
-        .background(appBackground)
-        .preferredColorScheme(.dark)
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $dropTargeted, perform: drop)
-        .alert("LumaWall", isPresented: Binding(
-            get: { state.alertMessage != nil || player.lastError != nil },
-            set: { if !$0 { state.alertMessage = nil; player.clearError() } }
-        )) {
-            Button("OK", role: .cancel) { state.alertMessage = nil; player.clearError() }
-        } message: {
-            Text(state.alertMessage ?? player.lastError ?? "")
+        .navigationTitle("Library")
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search Library")
+        .sheet(item: $detailItem) { item in
+            LibraryItemDetailView(itemID: item.id)
+                .environmentObject(state)
+                .frame(minWidth: 780, minHeight: 650)
+        }
+        .confirmationDialog(
+            "Remove this wallpaper?",
+            isPresented: Binding(
+                get: { pendingRemoval != nil },
+                set: { if !$0 { pendingRemoval = nil } }
+            ),
+            presenting: pendingRemoval
+        ) { item in
+            Button(item.isManaged ? "Remove from Library and Delete Files" : "Remove from Library", role: .destructive) {
+                state.remove(item)
+                pendingRemoval = nil
+            }
+            Button("Cancel", role: .cancel) { pendingRemoval = nil }
+        } message: { item in
+            Text(item.isManaged
+                 ? "The app will delete only this wallpaper’s managed storage folder."
+                 : "The original files will remain where they are.")
         }
     }
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 11) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .frame(width: 35, height: 35)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    private var header: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Your Wallpapers").font(.title2.weight(.semibold))
+                Text("\(state.library.count) item\(state.library.count == 1 ? "" : "s")")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Picker("Filter", selection: $filter) {
+                ForEach(LibraryFilter.allCases) { Text($0.title).tag($0) }
+            }
+            .frame(width: 120)
+            Picker("Sort", selection: $sort) {
+                ForEach(LibrarySort.allCases) { Text($0.title).tag($0) }
+            }
+            .frame(width: 155)
+            Picker("Layout", selection: $gridLayout) {
+                Image(systemName: "square.grid.2x2").tag(true)
+                Image(systemName: "list.bullet").tag(false)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 72)
+            Button {
+                state.chooseWallpaper()
+            } label: {
+                Label(state.isImporting ? "Importing…" : "Import", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(state.isImporting)
+        }
+        .padding(20)
+    }
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("LumaWall")
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
-                    Text("LIVE WALLPAPER STUDIO")
-                        .font(.system(size: 8, weight: .bold))
-                        .tracking(1.15)
-                        .foregroundStyle(.secondary)
+    @ViewBuilder private var content: some View {
+        if filteredItems.isEmpty {
+            ContentUnavailableView {
+                Label(state.library.isEmpty ? "No Wallpapers Yet" : "No Matching Wallpapers", systemImage: "photo.on.rectangle.angled")
+            } description: {
+                Text(state.library.isEmpty
+                     ? "Import a Wallpaper Engine project, ZIP, scene.pkg, or supported video."
+                     : "Change the search or filter to see more of your Library.")
+            } actions: {
+                if state.library.isEmpty {
+                    Button("Import Wallpaper…") { state.chooseWallpaper() }
+                        .buttonStyle(.borderedProminent)
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 19)
-            .padding(.bottom, 24)
+        } else if gridLayout {
+            ScrollView {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
+                    ForEach(filteredItems) { item in
+                        LibraryCard(item: item)
+                            .environmentObject(state)
+                            .onTapGesture { detailItem = item }
+                            .contextMenu { contextMenu(for: item) }
+                    }
+                }
+                .padding(20)
+            }
+        } else {
+            List(filteredItems) { item in
+                LibraryRow(item: item)
+                    .environmentObject(state)
+                    .contentShape(Rectangle())
+                    .onTapGesture { detailItem = item }
+                    .contextMenu { contextMenu(for: item) }
+            }
+            .listStyle(.inset)
+        }
+    }
 
-            Text("LIBRARY")
-                .font(.system(size: 10, weight: .semibold))
-                .tracking(1.05)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 19)
-                .padding(.bottom, 8)
+    @ViewBuilder private func contextMenu(for item: WallpaperItem) -> some View {
+        Button("Apply to All Displays") { state.play(item) }
+            .disabled(item.compatibility == .unsupported)
+        Button(item.isFavorite ? "Remove Favorite" : "Favorite") { state.toggleFavorite(item.id) }
+        if !state.playlists.isEmpty {
+            Menu("Add to Playlist") {
+                ForEach(state.playlists) { playlist in
+                    Button(playlist.name) { state.add(item.id, to: playlist.id) }
+                }
+            }
+        }
+        Button("Show in Finder") { state.showInFinder(item) }
+        Divider()
+        Button("Remove…", role: .destructive) { pendingRemoval = item }
+    }
 
-            if state.library.isEmpty {
-                Text("Your wallpapers will appear here.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 19)
-                    .padding(.top, 4)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 4) {
-                        ForEach(state.library) { item in
-                            WallpaperRow(
-                                item: item,
-                                isSelected: state.selectedID == item.id,
-                                isPlaying: player.currentItem?.id == item.id && player.isPlaying
-                            )
-                            .contentShape(Rectangle())
-                            .onTapGesture { state.selectedID = item.id }
-                            .contextMenu {
-                                Button("Set as Live Wallpaper") {
-                                    state.selectedID = item.id
-                                    state.playSelected()
+    private var filteredItems: [WallpaperItem] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = state.library.filter { item in
+            let matchesText = query.isEmpty
+                || item.name.localizedCaseInsensitiveContains(query)
+                || item.author?.localizedCaseInsensitiveContains(query) == true
+                || item.tags.contains { $0.localizedCaseInsensitiveContains(query) }
+            let matchesFilter: Bool
+            switch filter {
+            case .all: matchesFilter = true
+            case .favorites: matchesFilter = item.isFavorite
+            case .video: matchesFilter = item.kind == .video
+            case .web: matchesFilter = item.kind == .web
+            case .scene: matchesFilter = item.kind == .scenePackage
+            }
+            return matchesText && matchesFilter
+        }
+        return filtered.sorted { lhs, rhs in
+            switch sort {
+            case .recentlyPlayed:
+                return (lhs.lastPlayedAt ?? .distantPast) > (rhs.lastPlayedAt ?? .distantPast)
+            case .recentlyAdded: return lhs.dateAdded > rhs.dateAdded
+            case .name: return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .size: return (lhs.localSize ?? 0) > (rhs.localSize ?? 0)
+            }
+        }
+    }
+}
+
+private struct LibraryCard: View {
+    @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var player: WallpaperCoordinator
+    let item: WallpaperItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            LocalWallpaperArtwork(item: item)
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .overlay(alignment: .topTrailing) {
+                    if item.isFavorite {
+                        Image(systemName: "heart.fill")
+                            .foregroundStyle(.white, .pink)
+                            .padding(7)
+                            .background(.regularMaterial, in: Circle())
+                            .padding(8)
+                    }
+                }
+                .overlay(alignment: .bottomLeading) {
+                    if player.isWallpaperActive(item.id) {
+                        Label("Active", systemImage: "waveform")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 7).padding(.vertical, 5)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                            .padding(8)
+                    }
+                }
+            Text(item.name).font(.headline).lineLimit(1)
+            HStack {
+                Label(item.kind.title, systemImage: item.kind.symbolName)
+                Spacer()
+                CompatibilityBadge(status: item.compatibility)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+private struct LibraryRow: View {
+    @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var player: WallpaperCoordinator
+    let item: WallpaperItem
+
+    var body: some View {
+        HStack(spacing: 14) {
+            LocalWallpaperArtwork(item: item, cornerRadius: 7)
+                .frame(width: 112, height: 63)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(item.name).font(.headline)
+                    if item.isFavorite { Image(systemName: "heart.fill").foregroundStyle(.pink) }
+                }
+                HStack(spacing: 12) {
+                    Label(item.kind.title, systemImage: item.kind.symbolName)
+                    CompatibilityBadge(status: item.compatibility)
+                    if let size = item.localSize { Text(size.formattedByteCount) }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if player.isWallpaperActive(item.id) {
+                Label("Active", systemImage: "waveform").foregroundStyle(.green)
+            }
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+struct LibraryItemDetailView: View {
+    @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var player: WallpaperCoordinator
+    @EnvironmentObject private var displayManager: DisplayManager
+    @Environment(\.dismiss) private var dismiss
+    let itemID: UUID
+    @State private var selectedDisplayID: String?
+    @State private var confirmsRemoval = false
+
+    private var item: WallpaperItem? { state.library.first { $0.id == itemID } }
+    private var displayID: String? { selectedDisplayID ?? displayManager.displays.first?.id }
+    private var configuration: PlaybackConfiguration {
+        guard let displayID else { return settings.globalPlayback }
+        return player.configuration(for: displayID).playback
+    }
+
+    var body: some View {
+        Group {
+            if let item {
+                VStack(spacing: 0) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            WallpaperPreview(item: item, configuration: configuration)
+                                .aspectRatio(16 / 9, contentMode: .fit)
+                                .background(.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 7) {
+                                    Text(item.name).font(.largeTitle.weight(.bold))
+                                    if let author = item.author {
+                                        Label(author, systemImage: "person.crop.circle").foregroundStyle(.secondary)
+                                    }
+                                    HStack(spacing: 16) {
+                                        Label(item.kind.title, systemImage: item.kind.symbolName)
+                                        CompatibilityBadge(status: item.compatibility)
+                                        if let size = item.localSize { Text(size.formattedByteCount).foregroundStyle(.secondary) }
+                                    }
                                 }
-                                Divider()
-                                Button("Remove from Library", role: .destructive) {
-                                    state.selectedID = item.id
-                                    state.removeSelected()
+                                Spacer()
+                                Button {
+                                    state.toggleFavorite(item.id)
+                                } label: {
+                                    Label(item.isFavorite ? "Favorited" : "Favorite", systemImage: item.isFavorite ? "heart.fill" : "heart")
+                                }
+                            }
+
+                            if let summary = item.summary, !summary.isEmpty {
+                                Text(summary).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+
+                            if !item.compatibilityNotes.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Compatibility").font(.headline)
+                                    ForEach(item.compatibilityNotes, id: \.self) { note in
+                                        Label(note, systemImage: "info.circle")
+                                            .font(.callout).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(14)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+                            }
+
+                            playbackControls(for: item)
+                        }
+                        .padding(24)
+                    }
+                    Divider()
+                    HStack {
+                        Button("Show in Finder") { state.showInFinder(item) }
+                        Button("Remove…", role: .destructive) { confirmsRemoval = true }
+                        if !state.playlists.isEmpty {
+                            Menu("Add to Playlist") {
+                                ForEach(state.playlists) { playlist in
+                                    Button(playlist.name) { state.add(item.id, to: playlist.id) }
                                 }
                             }
                         }
-                    }
-                    .padding(.horizontal, 10)
-                }
-            }
-
-            Spacer(minLength: 10)
-
-            VStack(spacing: 10) {
-                Button {
-                    state.chooseWallpaper()
-                } label: {
-                    Label("Add Wallpaper", systemImage: "plus")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-
-                HStack {
-                    Text("\(state.library.count) \(state.library.count == 1 ? "wallpaper" : "wallpapers")")
-                    Spacer()
-                    if state.selectedItem != nil {
-                        Button {
-                            state.removeSelected()
-                        } label: {
-                            Image(systemName: "trash")
+                        Spacer()
+                        Button("Close") { dismiss() }
+                        Button("Apply") {
+                            state.play(item, on: displayID)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .help("Remove from Library")
+                        .buttonStyle(.borderedProminent)
+                        .disabled(item.compatibility == .unsupported || displayID == nil)
                     }
+                    .padding(16)
                 }
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            }
-            .padding(14)
-        }
-        .frame(width: 238)
-        .background(.ultraThinMaterial)
-    }
-
-    @ViewBuilder private var detail: some View {
-        if let item = state.selectedItem {
-            WallpaperDetail(item: item)
-                .environmentObject(state)
-                .environmentObject(player)
-        } else {
-            EmptyLibraryView(isDropTargeted: dropTargeted, choose: state.chooseWallpaper)
-        }
-    }
-
-    private var appBackground: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-            RadialGradient(
-                colors: [Color.cyan.opacity(0.09), Color.indigo.opacity(0.045), .clear],
-                center: .topTrailing,
-                startRadius: 40,
-                endRadius: 620
-            )
-        }
-        .ignoresSafeArea()
-    }
-
-    private func drop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { value, _ in
-            let url = (value as? URL) ?? (value as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
-            if let url { Task { @MainActor in state.importWallpaper(url) } }
-        }
-        return true
-    }
-}
-
-private struct WallpaperRow: View {
-    let item: WallpaperItem
-    let isSelected: Bool
-    let isPlaying: Bool
-
-    var body: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(LinearGradient(
-                        colors: [.cyan.opacity(0.28), .indigo.opacity(0.38)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-
-                if let previewURL = item.previewURL, let image = NSImage(contentsOf: previewURL) {
-                    Image(nsImage: image).resizable().scaledToFill()
-                } else {
-                    Image(systemName: item.kind == .scenePackage ? "cube.transparent" : "film")
-                        .foregroundStyle(.white.opacity(0.82))
-                }
-            }
-            .frame(width: 48, height: 34)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.name)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                Text(item.kind == .scenePackage ? "SCENE PACKAGE" : "VIDEO")
-                    .font(.system(size: 8, weight: .bold))
-                    .tracking(0.7)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 2)
-
-            if isPlaying {
-                Image(systemName: "waveform")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.cyan)
-                    .symbolEffect(.variableColor.iterative, options: .repeating)
-            }
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
-        .background(isSelected ? Color.white.opacity(0.105) : .clear)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-}
-
-private struct WallpaperDetail: View {
-    @EnvironmentObject private var state: AppState
-    @EnvironmentObject private var player: WallpaperPlayer
-    let item: WallpaperItem
-
-    private var isCurrent: Bool { player.currentItem?.id == item.id && player.isPlaying }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Wallpaper Preview")
-                            .font(.system(size: 22, weight: .semibold, design: .rounded))
-                        Text("Preview and control your desktop scene")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                .confirmationDialog("Remove \(item.name)?", isPresented: $confirmsRemoval) {
+                    Button(item.isManaged ? "Remove and Delete Managed Files" : "Remove from Library", role: .destructive) {
+                        state.remove(item)
+                        dismiss()
                     }
-                    Spacer()
-                    statusBadge
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(item.isManaged
+                         ? "Only this wallpaper’s folder inside application storage will be deleted."
+                         : "The original files will not be deleted.")
                 }
-
-                preview
-
-                HStack(alignment: .top, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(item.name)
-                            .font(.system(size: 25, weight: .bold, design: .rounded))
-                            .lineLimit(2)
-                        Label(item.kind == .scenePackage ? "Wallpaper Engine scene.pkg" : item.sourceURL.lastPathComponent,
-                              systemImage: item.kind == .scenePackage ? "cube.transparent" : "film")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    Spacer()
-
-                    playbackControls
-                }
-
-                VStack(alignment: .leading, spacing: 11) {
-                    Text("DISPLAY MODE")
-                        .font(.system(size: 10, weight: .semibold))
-                        .tracking(1.0)
-                        .foregroundStyle(.secondary)
-
-                    Picker("Display mode", selection: Binding(
-                        get: { player.scaling },
-                        set: { player.scaling = $0 }
-                    )) {
-                        ForEach(VideoScaling.allCases) { scaling in
-                            Label(scaling.title, systemImage: scaling == .fill ? "rectangle.inset.filled" : "rectangle.center.inset.filled")
-                                .tag(scaling)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 360)
-                }
-                .padding(16)
-                .background(Color.white.opacity(0.045))
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            }
-            .padding(28)
-        }
-    }
-
-    private var preview: some View {
-        ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(LinearGradient(
-                    colors: [Color(red: 0.03, green: 0.19, blue: 0.25), .indigo.opacity(0.58)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ))
-
-            if let previewURL = item.previewURL, let image = NSImage(contentsOf: previewURL) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
             } else {
-                Image(systemName: "sparkles.tv.fill")
-                    .font(.system(size: 70, weight: .light))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ContentUnavailableView("Wallpaper Removed", systemImage: "trash")
             }
-
-            LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .center, endPoint: .bottom)
-
-            HStack(spacing: 7) {
-                Label(item.kind == .scenePackage ? "NATIVE SCENE" : "VIDEO", systemImage: "play.fill")
-                Text("•")
-                Text("HARDWARE ACCELERATED")
-            }
-            .font(.system(size: 9, weight: .bold))
-            .tracking(0.8)
-            .foregroundStyle(.white.opacity(0.88))
-            .padding(14)
         }
-        .aspectRatio(16 / 9, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.32), radius: 24, y: 12)
+        .onAppear { selectedDisplayID = displayManager.displays.first?.id }
     }
 
-    private var statusBadge: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(isCurrent ? Color.green : Color.secondary)
-                .frame(width: 7, height: 7)
-            Text(isCurrent ? (player.isPaused ? "PAUSED" : "LIVE") : "READY")
-        }
-        .font(.system(size: 10, weight: .bold))
-        .tracking(0.75)
-        .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 7)
-        .background(Color.white.opacity(0.07))
-        .clipShape(Capsule())
-        .overlay { Capsule().strokeBorder(Color.white.opacity(0.09)) }
-    }
-
-    @ViewBuilder private var playbackControls: some View {
-        if isCurrent {
-            HStack(spacing: 8) {
-                Button {
-                    player.togglePause()
-                } label: {
-                    Label(player.isPaused ? "Resume" : "Pause", systemImage: player.isPaused ? "play.fill" : "pause.fill")
+    private func playbackControls(for item: WallpaperItem) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Playback and Display").font(.headline)
+            if displayManager.displays.count > 1 {
+                Picker("Target display", selection: $selectedDisplayID) {
+                    ForEach(displayManager.displays) { display in
+                        Text(display.name).tag(Optional(display.id))
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                Button {
-                    player.stop()
-                } label: {
-                    Image(systemName: "stop.fill")
+            }
+            if let displayID {
+                Picker("Scale", selection: Binding(
+                    get: { player.configuration(for: displayID).playback.scaling },
+                    set: { value in player.updatePlayback(for: displayID) { $0.scaling = value } }
+                )) {
+                    ForEach(VideoScaling.allCases) { Text($0.title).tag($0) }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .help("Stop Wallpaper")
-            }
-        } else {
-            Button {
-                state.playSelected()
-            } label: {
-                Label("Set as Wallpaper", systemImage: "play.fill")
-                    .fontWeight(.semibold)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.cyan)
-            .controlSize(.large)
-        }
-    }
-}
+                .disabled(item.kind == .web)
 
-private struct EmptyLibraryView: View {
-    let isDropTargeted: Bool
-    let choose: () -> Void
-
-    var body: some View {
-        VStack(spacing: 22) {
-            ZStack {
-                Circle()
-                    .fill(LinearGradient(colors: [.cyan.opacity(0.20), .indigo.opacity(0.22)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 94, height: 94)
-                Image(systemName: isDropTargeted ? "arrow.down.doc.fill" : "sparkles.tv.fill")
-                    .font(.system(size: 40, weight: .light))
-                    .foregroundStyle(.cyan)
-            }
-
-            VStack(spacing: 7) {
-                Text(isDropTargeted ? "Drop to import" : "Bring your desktop to life")
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-                Text("Add a video, scene.pkg, or Wallpaper Engine project folder.\nLumaWall will inspect it before anything runs.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .lineSpacing(3)
-            }
-
-            Button(action: choose) {
-                Label("Choose Wallpaper…", systemImage: "plus")
-                    .fontWeight(.semibold)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.cyan)
-            .controlSize(.large)
-
-            HStack(spacing: 16) {
-                Label("MP4 · MOV · M4V", systemImage: "film")
-                Label("scene.pkg", systemImage: "cube.transparent")
-            }
-            .font(.caption)
-            .foregroundStyle(.tertiary)
-        }
-        .padding(44)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay {
-            if isDropTargeted {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(Color.cyan, style: StrokeStyle(lineWidth: 2, dash: [8, 7]))
-                    .padding(20)
+                if item.kind == .video || item.kind == .web {
+                    Toggle("Mute", isOn: Binding(
+                        get: { player.configuration(for: displayID).playback.isMuted },
+                        set: { value in player.updatePlayback(for: displayID) { $0.isMuted = value } }
+                    ))
+                    HStack {
+                        Text("Volume")
+                        Slider(value: Binding(
+                            get: { player.configuration(for: displayID).playback.volume },
+                            set: { value in player.updatePlayback(for: displayID) { $0.volume = value } }
+                        ), in: 0...1)
+                    }
+                    Picker("Playback speed", selection: Binding(
+                        get: { player.configuration(for: displayID).playback.playbackRate },
+                        set: { value in player.updatePlayback(for: displayID) { $0.playbackRate = value } }
+                    )) {
+                        Text("0.5×").tag(0.5)
+                        Text("1×").tag(1.0)
+                        Text("1.5×").tag(1.5)
+                        Text("2×").tag(2.0)
+                    }
+                }
             }
         }
-        .animation(.easeOut(duration: 0.18), value: isDropTargeted)
+        .padding(14)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
     }
 }

@@ -71,8 +71,6 @@ final class WallpaperCoordinator: NSObject, ObservableObject {
         }
     }
 
-    func clearError() { lastError = nil }
-
     private enum Keys {
         static let configurations = "display.configurations.v2"
         static let activeID = "player.activeID"
