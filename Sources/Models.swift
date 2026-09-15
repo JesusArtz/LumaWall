@@ -353,7 +353,6 @@ enum ImportError: LocalizedError, Equatable {
     case unsupportedFile(String)
     case invalidProject
     case unsupportedProject(String)
-    case videoMissing
     case assetMissing(String)
     case unsafeProjectPath(String)
     case archiveExtractionFailed
@@ -369,8 +368,6 @@ enum ImportError: LocalizedError, Equatable {
             return "The selected item does not contain a valid Wallpaper Engine project.json or scene package."
         case .unsupportedProject(let kind):
             return "This Wallpaper Engine \(kind) project is not supported."
-        case .videoMissing:
-            return "The project describes a video wallpaper, but its video file is missing."
         case .assetMissing(let path):
             return "The project’s main asset is missing or unsupported: \(path)"
         case .unsafeProjectPath(let path):
